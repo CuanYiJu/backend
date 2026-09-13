@@ -102,6 +102,17 @@ npm run deploy      # builds ../frontend, uploads assets + Worker
 
 Login mail goes through **Mailjet** (free: 6,000 / month, 200 / day) when `MAILJET_API_KEY` and `MAILJET_SECRET_KEY` are set; `EMAIL_FROM` must be a sender address validated in Mailjet (a single address can be validated without owning a domain; SPF/DKIM on a domain improves deliverability). Resend is supported too (`RESEND_API_KEY`). With neither set the Worker prints login emails to its log; read the code with `npx wrangler tail` while testing. Later schema changes: add `migrations/000N_*.sql`, run `npm run d1:migrate`, deploy.
 
+### Staging
+
+`https://staging.juer.now` is a second Worker (`kaiju-site-staging`) with its own D1 database, deployed from the same code via the `[env.staging]` section of `../wrangler.toml`. Use it to try changes before `npm run deploy`:
+
+```bash
+npm run deploy:staging            # build + deploy to staging
+npm run d1:migrate:staging        # apply new migrations to the staging D1 first
+npm run secret:staging -- NAME    # secrets are per Worker; MAGIC_LINK_SECRET is set, Mailjet keys are not
+npm run tail:staging              # live logs (login codes while no mail provider is configured)
+```
+
 Local Worker run (workerd + a local D1 file; secrets and overrides come from `../.dev.vars`, next to the config):
 
 ```bash

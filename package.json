@@ -18,7 +18,12 @@
     "d1:migrate:local": "wrangler --config ../wrangler.toml d1 migrations apply DB --local",
     "d1:migrate": "wrangler --config ../wrangler.toml d1 migrations apply DB --remote",
     "deploy": "npm --prefix ../frontend run build && wrangler --config ../wrangler.toml deploy",
-    "secret": "wrangler --config ../wrangler.toml secret put"
+    "secret": "wrangler --config ../wrangler.toml secret put",
+    "d1:migrate:staging": "wrangler --config ../wrangler.toml --env staging d1 migrations apply DB --remote",
+    "secret:staging": "wrangler --config ../wrangler.toml --env staging secret put",
+    "deploy:staging": "npm --prefix ../frontend run build && wrangler --config ../wrangler.toml --env staging deploy",
+    "tail": "wrangler --config ../wrangler.toml tail",
+    "tail:staging": "wrangler --config ../wrangler.toml --env staging tail"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
