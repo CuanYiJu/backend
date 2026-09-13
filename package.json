@@ -1,0 +1,33 @@
+{
+  "name": "@kaiju/site-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "开局 · 桌游群组局 — API backend (Hono + SQLite, magic-link login).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "node --watch --env-file-if-exists=.env src/server.ts",
+    "start": "node --env-file-if-exists=.env src/server.ts",
+    "test": "node --test test/*.test.ts",
+    "seed": "node --env-file-if-exists=.env scripts/seed.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test",
+    "dev:worker": "wrangler --config ../wrangler.toml dev --port 8790",
+    "d1:migrate:local": "wrangler --config ../wrangler.toml d1 migrations apply DB --local",
+    "d1:migrate": "wrangler --config ../wrangler.toml d1 migrations apply DB --remote",
+    "deploy": "npm --prefix ../frontend run build && wrangler --config ../wrangler.toml deploy",
+    "secret": "wrangler --config ../wrangler.toml secret put"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.13.7",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.4",
+    "typescript": "~6.0.3",
+    "wrangler": "^4.131.1"
+  }
+}

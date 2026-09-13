@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
