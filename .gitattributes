@@ -1,0 +1,7 @@
+# Keep LF everywhere, same as the docs repo.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary
+*.woff2 binary
