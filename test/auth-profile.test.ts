@@ -122,12 +122,12 @@ test('mutations from a foreign origin are rejected', async () => {
   }
 });
 
-test('the magic-link verify page does not use no-referrer (browsers would send Origin: null on the POST)', async () => {
+test('the magic-link verify page does not use no-referrer (browsers would send Origin: null on the POST; fixed upstream, guarded here)', async () => {
   const app = await testApp();
   try {
     const res = await app.fetch('/auth/verify?token=abcdefghijklmnopqrstuvwxyz0123456789');
     assert.equal(res.status, 200);
-    assert.equal(res.headers.get('referrer-policy'), 'origin');
+    assert.notEqual(res.headers.get('referrer-policy'), 'no-referrer');
     assert.match(await res.text(), /<form method="post"/);
 
     // And a POST that arrives with Origin: null is still refused.

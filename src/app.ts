@@ -21,12 +21,7 @@ export function createApp(config: AppConfig, db: Db, options: AuthOptions = {}):
   const hono = new Hono();
 
   hono.post('/auth/magic-link', (c) => handlers.requestLink(c.req.raw));
-  // The package's verify page sends `Referrer-Policy: no-referrer`. Under that
-  // policy browsers put `Origin: null` on the auto-submitted form POST, which
-  // the package's own Origin check then rejects (link login fails with
-  // bad_origin). `origin` still keeps the token out of the Referer while
-  // leaving the Origin header intact. Remove once fixed upstream in http.ts.
-  hono.get('/auth/verify', async (c) => withHeader(await handlers.verifyPage(c.req.raw), 'Referrer-Policy', 'origin'));
+  hono.get('/auth/verify', (c) => handlers.verifyPage(c.req.raw));
   hono.post('/auth/verify', (c) => handlers.verifyLink(c.req.raw));
   hono.post('/auth/verify-code', (c) => handlers.verifyCode(c.req.raw));
   hono.post('/auth/logout', (c) => handlers.logout(c.req.raw));
@@ -41,10 +36,4 @@ export function createApp(config: AppConfig, db: Db, options: AuthOptions = {}):
 /** Paths the API owns; everything else is the frontend. */
 export function isApiPath(pathname: string): boolean {
   return pathname.startsWith('/api/') || pathname.startsWith('/auth/') || pathname === '/healthz';
-}
-
-function withHeader(res: Response, name: string, value: string): Response {
-  const headers = new Headers(res.headers);
-  headers.set(name, value);
-  return new Response(res.body, { status: res.status, headers });
 }

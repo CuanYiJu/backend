@@ -13,7 +13,7 @@ import {
   type SqlClient,
 } from './magic-link.ts';
 import type { AppConfig } from './config.ts';
-import { MailjetMailer, boundFetch } from './mailers/mailjet.ts';
+import { MailjetMailer } from './mailers/mailjet.ts';
 
 export interface Auth {
   service: MagicLinkService;
@@ -52,9 +52,7 @@ export class LoggingMailer implements Mailer {
 /** Mailjet when its keys are set, else Resend, else print to the log. */
 export function selectMailer(config: AppConfig): Mailer {
   if (config.mailjet) return new LoggingMailer('mailjet', new MailjetMailer(config.mailjet));
-  // `fetch` passed explicitly: the package keeps it as a field and calls it as a
-  // method, which throws "Illegal invocation" on Workers with the bare global.
-  if (config.resendApiKey) return new LoggingMailer('resend', new ResendMailer({ apiKey: config.resendApiKey, fetch: boundFetch }));
+  if (config.resendApiKey) return new LoggingMailer('resend', new ResendMailer({ apiKey: config.resendApiKey }));
   return new ConsoleMailer();
 }
 
