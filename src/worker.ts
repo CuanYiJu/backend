@@ -31,7 +31,15 @@ function appFor(env: Env): App {
 
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
-    const { pathname } = new URL(request.url);
+    const url = new URL(request.url);
+    // One canonical host: cookies and the login Origin check are bound to APP_BASE_URL.
+    const canonical = typeof env.APP_BASE_URL === 'string' ? new URL(env.APP_BASE_URL) : null;
+    if (canonical && url.host !== canonical.host) {
+      url.protocol = canonical.protocol;
+      url.host = canonical.host;
+      return Response.redirect(url.toString(), 301);
+    }
+    const { pathname } = url;
     if (!isApiPath(pathname)) return env.ASSETS.fetch(request);
     return appFor(env).hono.fetch(request, env, ctx as never);
   },
