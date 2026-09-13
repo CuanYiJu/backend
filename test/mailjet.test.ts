@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MailjetMailer, parseAddress } from '../src/mailers/mailjet.ts';
+import { MailjetMailer, boundFetch, parseAddress } from '../src/mailers/mailjet.ts';
 import { loadConfig } from '../src/config.ts';
 import { LoggingMailer, selectMailer } from '../src/auth.ts';
 
@@ -68,4 +68,17 @@ test('LoggingMailer logs the provider error and rethrows', async () => {
   } finally {
     console.error = orig;
   }
+});
+
+test('mailers never keep the bare global fetch as a field (Workers throws Illegal invocation)', () => {
+  // Simulate a runtime that checks `this`, like workerd does for fetch.
+  const strict = function (this: unknown) {
+    if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+    return Promise.resolve(new Response('{}', { status: 200 }));
+  } as unknown as typeof fetch;
+  const holder = { fn: strict };
+  assert.throws(() => holder.fn('https://x'), /Illegal invocation/);
+  const viaBound = { fn: ((i: Parameters<typeof fetch>[0], init?: RequestInit) => strict(i, init)) as typeof fetch };
+  assert.doesNotThrow(() => viaBound.fn('https://x'));
+  assert.equal(typeof boundFetch, 'function');
 });

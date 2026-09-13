@@ -28,7 +28,9 @@ export class MailjetMailer implements Mailer {
   constructor(opts: MailjetMailerOptions) {
     if (!opts.apiKey || !opts.secretKey) throw new Error('MailjetMailer: apiKey and secretKey are required');
     this.auth = `Basic ${btoa(`${opts.apiKey}:${opts.secretKey}`)}`;
-    this.fetchFn = opts.fetch ?? fetch;
+    // Never store the bare global: calling it as `this.fetchFn(...)` gives it
+    // the mailer as `this`, which the Workers runtime rejects ("Illegal invocation").
+    this.fetchFn = opts.fetch ?? boundFetch;
     this.endpoint = opts.endpoint ?? 'https://api.mailjet.com/v3.1/send';
   }
 
@@ -71,3 +73,6 @@ export function parseAddress(value: string): { name: string | null; email: strin
   if (m && m[2]) return { name: m[1]?.trim() || null, email: m[2].trim() };
   return { name: null, email: value.trim() };
 }
+
+/** The global fetch with a neutral `this`, safe to keep as a field on Workers and Node alike. */
+export const boundFetch: typeof fetch = (input, init) => fetch(input, init);
