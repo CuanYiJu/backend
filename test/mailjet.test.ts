@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MailjetMailer, parseAddress } from '../src/mailers/mailjet.ts';
 import { loadConfig } from '../src/config.ts';
-import { selectMailer } from '../src/auth.ts';
+import { LoggingMailer, selectMailer } from '../src/auth.ts';
 
 const message = { to: 'someone@example.com', from: '开局 <login@example.com>', subject: '开局 登录验证码 123456', text: 'text', html: '<p>html</p>' };
 
@@ -49,8 +49,23 @@ test('MailjetMailer surfaces HTTP errors and per-message rejections', async () =
 
 test('config picks Mailjet when both keys are set and refuses half a pair', () => {
   const base = { NODE_ENV: 'test', MAGIC_LINK_SECRET: 'x'.repeat(40), APP_BASE_URL: 'http://localhost:5173', EMAIL_FROM: 'a <a@b.c>', ADMIN_EMAILS: 'a@b.c' };
-  assert.equal(selectMailer(loadConfig({ ...base, MAILJET_API_KEY: 'k', MAILJET_SECRET_KEY: 's' })).constructor.name, 'MailjetMailer');
-  assert.equal(selectMailer(loadConfig({ ...base, RESEND_API_KEY: 'r' })).constructor.name, 'ResendMailer');
-  assert.equal(selectMailer(loadConfig(base)).constructor.name, 'ConsoleMailer');
+  const provider = (m: unknown) => (m instanceof LoggingMailer ? m.provider : (m as object).constructor.name);
+  assert.equal(provider(selectMailer(loadConfig({ ...base, MAILJET_API_KEY: 'k', MAILJET_SECRET_KEY: 's' }))), 'mailjet');
+  assert.equal(provider(selectMailer(loadConfig({ ...base, RESEND_API_KEY: 'r' }))), 'resend');
+  assert.equal(provider(selectMailer(loadConfig(base))), 'ConsoleMailer');
   assert.throws(() => loadConfig({ ...base, MAILJET_API_KEY: 'k' }), /both/);
+});
+
+test('LoggingMailer logs the provider error and rethrows', async () => {
+  const errors: string[] = [];
+  const orig = console.error;
+  console.error = (msg: unknown) => errors.push(String(msg));
+  try {
+    const failing = { send: async () => { throw new Error('ResendMailer: 403 Forbidden {"message":"domain not verified"}'); } };
+    await assert.rejects(new LoggingMailer('resend', failing).send(message), /403/);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0] as string, /\[mail:resend\] send to someone@example.com failed: .*domain not verified/);
+  } finally {
+    console.error = orig;
+  }
 });

@@ -7,6 +7,7 @@ import {
   PgUserStore,
   ResendMailer,
   createHandlers,
+  type EmailMessage,
   type Mailer,
   type MagicLinkHandlers,
   type SqlClient,
@@ -24,10 +25,34 @@ export interface AuthOptions {
   mailer?: Mailer;
 }
 
+/**
+ * Logs every failed send with the provider's own error text before
+ * rethrowing, so `wrangler tail` / Workers Logs show *why* login mail
+ * bounced instead of only the generic 503 the user sees.
+ */
+export class LoggingMailer implements Mailer {
+  readonly provider: string;
+  private readonly inner: Mailer;
+
+  constructor(provider: string, inner: Mailer) {
+    this.provider = provider;
+    this.inner = inner;
+  }
+
+  async send(message: EmailMessage): Promise<void> {
+    try {
+      await this.inner.send(message);
+    } catch (err) {
+      console.error(`[mail:${this.provider}] send to ${message.to} failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    }
+  }
+}
+
 /** Mailjet when its keys are set, else Resend, else print to the log. */
 export function selectMailer(config: AppConfig): Mailer {
-  if (config.mailjet) return new MailjetMailer(config.mailjet);
-  if (config.resendApiKey) return new ResendMailer({ apiKey: config.resendApiKey });
+  if (config.mailjet) return new LoggingMailer('mailjet', new MailjetMailer(config.mailjet));
+  if (config.resendApiKey) return new LoggingMailer('resend', new ResendMailer({ apiKey: config.resendApiKey }));
   return new ConsoleMailer();
 }
 
