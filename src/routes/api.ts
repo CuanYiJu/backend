@@ -4,8 +4,18 @@ import type { Db } from '../db/types.ts';
 import type { AppConfig } from '../config.ts';
 import type { Auth } from '../auth.ts';
 import { ApiError, forbidden, profileRequired, unauthenticated } from '../errors.ts';
-import { addMember, approveRequest, countApprovalRequests, getProfile, listApprovalRequests, rejectRequest, upsertProfile, type Profile } from '../services/profiles.ts';
-import { addInviteNames, listInviteNames, removeInviteName } from '../services/invites.ts';
+import {
+  addMember,
+  approveRequest,
+  countApprovalRequests,
+  getProfile,
+  listApprovalRequests,
+  listMembers,
+  rejectRequest,
+  removeMember,
+  upsertProfile,
+  type Profile,
+} from '../services/profiles.ts';
 import {
   cancelEvent,
   createEvent,
@@ -24,11 +34,19 @@ export interface ApiDeps {
   auth: Auth;
 }
 
+/**
+ * Admins only get host powers on other people's events while "群主模式" is
+ * on, which the client signals per request with this header. Off by
+ * default, so an admin browsing normally cannot change anything by accident.
+ */
+export const ADMIN_MODE_HEADER = 'x-admin-mode';
+
 type Env = {
   Variables: {
     userId: string | null;
     email: string | null;
     isAdmin: boolean;
+    adminMode: boolean;
     profile: Profile | null;
   };
 };
@@ -43,6 +61,7 @@ const optionalText = (max: number) =>
 const profileSchema = z.object({
   nickname: trimmed(20).min(2, '昵称 2–20 个字。'),
   wechatName: optionalText(40),
+  greeting: optionalText(300),
   bio: optionalText(200),
 });
 
@@ -77,8 +96,7 @@ const updateEventSchema = z.object({
 });
 
 const cancelSchema = z.object({ reason: optionalText(200) });
-const inviteNamesSchema = z.object({ names: z.string().max(20_000) });
-const rejectSchema = z.object({ note: optionalText(200) });
+const noteSchema = z.object({ note: optionalText(200) });
 const addMemberSchema = z.object({
   email: z.string().trim().email('请填写正确的邮箱。').max(254),
   wechatName: trimmed(40).min(1, '请填写微信名。'),
@@ -100,7 +118,7 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
   const allowedOrigins = new Set([config.magicLink.baseUrl]);
   const admins = new Set(config.adminEmails);
 
-  // Session, profile and admin flag for every request. Mutations also check
+  // Session, profile and admin flags for every request. Mutations also check
   // Origin, the same CSRF rule the magic-link routes apply (SameSite=Lax
   // does the rest).
   api.use('*', async (c, next) => {
@@ -114,9 +132,11 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
       const { rows } = await db.query<{ email: string }>('select email from users where id = $1', [session.userId]);
       email = rows[0]?.email ?? null;
     }
+    const isAdmin = email !== null && admins.has(email);
     c.set('userId', session?.userId ?? null);
     c.set('email', email);
-    c.set('isAdmin', email !== null && admins.has(email));
+    c.set('isAdmin', isAdmin);
+    c.set('adminMode', isAdmin && c.req.header(ADMIN_MODE_HEADER) === '1');
     c.set('profile', session ? await getProfile(db, session.userId) : null);
     await next();
   });
@@ -138,13 +158,16 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
     if (!profile) throw profileRequired();
     if (profile.status === 'pending') throw new ApiError(403, 'approval_pending', '群主还没审核，请稍等。');
     if (profile.status === 'rejected') throw new ApiError(403, 'approval_rejected', '群主没有通过你的申请。');
+    if (profile.status === 'removed') throw new ApiError(403, 'membership_removed', '你已经不在这个群的成员里了。');
     return userId;
   };
   const requireAdmin = (c: Context<Env>): string => {
     const userId = requireUser(c);
-    if (!c.get('isAdmin')) throw forbidden('只有群主可以管理名单。');
+    if (!c.get('isAdmin')) throw forbidden('只有群主可以这样做。');
     return userId;
   };
+  /** Host powers beyond one's own events only in admin mode. */
+  const viewer = (c: Context<Env>) => ({ isAdmin: c.get('adminMode') });
 
   api.get('/me', async (c) => {
     const userId = requireUser(c);
@@ -164,21 +187,12 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
     return c.json({ profile }, created ? 201 : 200);
   });
 
-  api.get('/admin/invite-names', async (c) => {
-    requireAdmin(c);
-    return c.json({ names: await listInviteNames(db) });
-  });
+  // ── admin: membership ────────────────────────────────────────────────
 
-  api.post('/admin/invite-names', async (c) => {
-    const adminId = requireAdmin(c);
-    const { names } = await parseBody(c, inviteNamesSchema);
-    return c.json(await addInviteNames(db, adminId, names), 201);
-  });
-
-  api.delete('/admin/invite-names/:id', async (c) => {
+  api.get('/admin/members', async (c) => {
     requireAdmin(c);
-    await removeInviteName(db, c.req.param('id'));
-    return c.body(null, 204);
+    const members = await listMembers(db);
+    return c.json({ members: members.map((m) => ({ ...m, isAdmin: admins.has(m.email) })) });
   });
 
   api.post('/admin/members', async (c) => {
@@ -186,6 +200,16 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
     const input = await parseBody(c, addMemberSchema);
     const result = await addMember(db, input);
     return c.json(result, result.created ? 201 : 200);
+  });
+
+  api.delete('/admin/members/:userId', async (c) => {
+    const adminId = requireAdmin(c);
+    const target = c.req.param('userId');
+    if (target === adminId) throw new ApiError(409, 'cannot_remove_self', '不能移出自己。');
+    const { rows } = await db.query<{ email: string }>('select email from users where id = $1', [target]);
+    if (rows[0] && admins.has(rows[0].email)) throw new ApiError(409, 'cannot_remove_admin', '不能移出群主。');
+    const { note } = await parseBody(c, noteSchema);
+    return c.json(await removeMember(db, target, note));
   });
 
   api.get('/admin/requests', async (c) => {
@@ -200,9 +224,11 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
 
   api.post('/admin/requests/:userId/reject', async (c) => {
     requireAdmin(c);
-    const { note } = await parseBody(c, rejectSchema);
+    const { note } = await parseBody(c, noteSchema);
     return c.json({ profile: await rejectRequest(db, c.req.param('userId'), note) });
   });
+
+  // ── events ───────────────────────────────────────────────────────────
 
   api.get('/events', async (c) => {
     const userId = requireMember(c);
@@ -210,7 +236,7 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
     if (scope !== undefined && scope !== 'upcoming' && scope !== 'past' && scope !== 'mine') {
       throw new ApiError(400, 'validation', 'scope 只能是 upcoming / past / mine。');
     }
-    return c.json({ events: await listEvents(db, scope ?? 'upcoming', userId, new Date(), { isAdmin: c.get('isAdmin') }) });
+    return c.json({ events: await listEvents(db, scope ?? 'upcoming', userId, new Date(), viewer(c)) });
   });
 
   // Before /events/:id so "search" is not taken for an id.
@@ -218,7 +244,7 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
     const userId = requireMember(c);
     const q = (c.req.query('q') ?? '').trim();
     if (q.length > 50) throw new ApiError(400, 'validation', '搜索词太长了。');
-    return c.json({ events: q ? await searchEvents(db, q, userId, new Date(), { isAdmin: c.get('isAdmin') }) : [] });
+    return c.json({ events: q ? await searchEvents(db, q, userId, new Date(), viewer(c)) : [] });
   });
 
   api.post('/events', async (c) => {
@@ -227,8 +253,6 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
     const events = await createEvent(db, userId, input);
     return c.json({ events }, 201);
   });
-
-  const viewer = (c: Context<Env>) => ({ isAdmin: c.get('isAdmin') });
 
   api.get('/events/:id', async (c) => {
     const userId = requireMember(c);

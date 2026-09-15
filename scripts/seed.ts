@@ -6,12 +6,10 @@
  * Safe to run while `npm run dev` is up (SQLite WAL). Re-running adds more
  * events but reuses the demo members. Never run against production.
  */
-import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../src/config.ts';
 import { SqliteDb } from '../src/db/sqlite.ts';
 import { migrate } from '../src/db/migrate.ts';
-import { upsertProfile } from '../src/services/profiles.ts';
-import { addInviteNames } from '../src/services/invites.ts';
+import { addMember } from '../src/services/profiles.ts';
 import { createEvent, joinEvent } from '../src/services/events.ts';
 
 const config = loadConfig();
@@ -27,18 +25,16 @@ const members: { email: string; nickname: string; wechatName: string }[] = [
 ];
 
 const now = new Date();
-// The admin would paste these on /admin; here they come straight from the seed.
-await addInviteNames(db, null, members.map((m) => m.wechatName).join('\n'), now);
+// As if the admin had added them directly on /admin.
 const ids: string[] = [];
 for (const m of members) {
   const { rows } = await db.query<{ id: string }>('select id from users where email = $1', [m.email]);
-  let id = rows[0]?.id;
-  if (!id) {
-    id = randomUUID();
-    await db.query('insert into users (id, email, created_at) values ($1, $2, $3)', [id, m.email, now.toISOString()]);
+  if (rows[0]) {
+    ids.push(rows[0].id);
+    continue;
   }
-  await upsertProfile(db, id, { nickname: m.nickname, wechatName: m.wechatName }, false, now);
-  ids.push(id);
+  const { profile } = await addMember(db, { email: m.email, wechatName: m.wechatName, nickname: m.nickname }, now);
+  ids.push(profile.userId);
 }
 const [a, b, c, d] = ids as [string, string, string, string];
 

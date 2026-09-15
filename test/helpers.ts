@@ -7,17 +7,26 @@ import { createApp } from '../src/app.ts';
 export const ORIGIN = 'http://localhost:5173';
 export const ADMIN_EMAIL = 'admin@example.com';
 
+export interface FetchInit extends RequestInit {
+  cookie?: string;
+  json?: unknown;
+  /** Send the 群主模式 header (admin powers on other people's events). */
+  adminMode?: boolean;
+}
+
 export interface TestApp {
   config: AppConfig;
   db: SqliteDb;
   mailer: CaptureMailer;
-  fetch(path: string, init?: RequestInit & { cookie?: string; json?: unknown }): Promise<Response>;
+  fetch(path: string, init?: FetchInit): Promise<Response>;
   /** Full login through the magic-link code path; returns the session cookie. */
   login(email: string): Promise<string>;
-  /** Login as the admin and create their profile (admins bypass the name list). */
+  /** Login as the admin and create their profile (admins are active at once). */
   admin(): Promise<string>;
-  /** Login, put `wechatName` on the list as the admin, and claim it with a profile. */
+  /** An active member: added directly by the admin, then logged in. */
   member(email: string, nickname?: string, wechatName?: string): Promise<string>;
+  /** A newcomer who applied with a 打招呼 and is waiting. */
+  applicant(email: string, nickname?: string, wechatName?: string, greeting?: string): Promise<string>;
   close(): void;
 }
 
@@ -36,11 +45,12 @@ export async function testApp(): Promise<TestApp> {
   const { hono } = createApp(config, db, { mailer });
 
   const fetch: TestApp['fetch'] = (path, init = {}) => {
-    const { cookie, json, ...rest } = init;
+    const { cookie, json, adminMode, ...rest } = init;
     const headers = new Headers(rest.headers);
     if (!headers.has('origin')) headers.set('Origin', ORIGIN);
     if (cookie) headers.set('Cookie', cookie);
     if (json !== undefined) headers.set('Content-Type', 'application/json');
+    if (adminMode) headers.set('x-admin-mode', '1');
     const requestInit: RequestInit = { ...rest, headers };
     if (json !== undefined) requestInit.body = JSON.stringify(json);
     return Promise.resolve(hono.request(path, requestInit));
@@ -69,15 +79,19 @@ export async function testApp(): Promise<TestApp> {
 
   const member = async (email: string, nickname = email.split('@')[0] as string, wechatName = `wx-${nickname}`): Promise<string> => {
     const a = await admin();
-    const added = await fetch('/api/admin/invite-names', { method: 'POST', cookie: a, json: { names: wechatName } });
-    if (added.status !== 201) throw new Error(`add name failed: ${added.status} ${await added.text()}`);
+    const added = await fetch('/api/admin/members', { method: 'POST', cookie: a, json: { email, wechatName, nickname } });
+    if (added.status !== 201) throw new Error(`add member failed: ${added.status} ${await added.text()}`);
+    return login(email);
+  };
+
+  const applicant = async (email: string, nickname = email.split('@')[0] as string, wechatName = `wx-${nickname}`, greeting = '我是群里的人'): Promise<string> => {
     const cookie = await login(email);
-    const res = await fetch('/api/profile', { method: 'PUT', cookie, json: { nickname, wechatName } });
-    if (res.status !== 201) throw new Error(`profile creation failed: ${res.status} ${await res.text()}`);
+    const res = await fetch('/api/profile', { method: 'PUT', cookie, json: { nickname, wechatName, greeting } });
+    if (res.status !== 201) throw new Error(`application failed: ${res.status} ${await res.text()}`);
     return cookie;
   };
 
-  return { config, db, mailer, fetch, login, admin, member, close: () => db.close() };
+  return { config, db, mailer, fetch, login, admin, member, applicant, close: () => db.close() };
 }
 
 export async function body<T = Record<string, unknown>>(res: Response): Promise<T> {

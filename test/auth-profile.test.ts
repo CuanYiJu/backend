@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { body, expectJson, testApp } from './helpers.ts';
-import type { InviteName } from '../src/services/invites.ts';
+import type { ApprovalRequest, Member } from '../src/services/profiles.ts';
 
 test('magic-link login works end to end on SQLite and /api/me reports no profile yet', async () => {
   const app = await testApp();
@@ -26,80 +26,121 @@ test('magic-link login works end to end on SQLite and /api/me reports no profile
   }
 });
 
-test('profile creation requires a WeChat name from the admin list; admins bypass it', async () => {
+test('newcomers apply with a 打招呼 and wait; admins are active at once', async () => {
   const app = await testApp();
   try {
-    // Admin onboarding needs no list entry, and is recorded as claimed.
     const admin = await app.admin();
-    const me = await body<{ isAdmin: boolean; profile: { wechatName: string } }>(await app.fetch('/api/me', { cookie: admin }));
+    const me = await body<{ isAdmin: boolean; profile: { status: string; wechatName: string } }>(await app.fetch('/api/me', { cookie: admin }));
     assert.equal(me.isAdmin, true);
-    assert.equal(me.profile.wechatName, '群主本人');
-
-    // Admin pastes names: newlines, commas and 、 all separate; duplicates are reported.
-    const added = await expectJson<{ added: InviteName[]; duplicates: string[] }>(
-      await app.fetch('/api/admin/invite-names', { method: 'POST', cookie: admin, json: { names: '小明 🎲\n阿花, 老王、小明🎲\n\n' } }),
-      201,
-    );
-    assert.deepEqual(added.added.map((n) => n.name), ['小明 🎲', '阿花', '老王']);
-    assert.deepEqual(added.duplicates, []);
-    const again = await expectJson<{ added: InviteName[]; duplicates: string[] }>(
-      await app.fetch('/api/admin/invite-names', { method: 'POST', cookie: admin, json: { names: '阿花' } }),
-      201,
-    );
-    assert.deepEqual(again.duplicates, ['阿花']);
+    assert.equal(me.profile.status, 'active');
 
     const cookie = await app.login('bob@example.com');
 
-    // Missing name.
-    const missing = await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '小明' } });
-    assert.equal(missing.status, 400);
+    // Missing pieces.
+    const noName = await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '小明', greeting: '你好' } });
+    assert.equal(noName.status, 400);
+    const noGreeting = await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '小明', wechatName: '小明🎲' } });
+    assert.equal(noGreeting.status, 400);
+    assert.match((await body(noGreeting)).message as string, /打个招呼/);
+    const short = await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '明', wechatName: '小明🎲', greeting: '你好' } });
+    assert.equal(short.status, 400);
 
-    // Whitespace, case and full-width forms are forgiven; emoji must match.
-    const ok = await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '小明', wechatName: '小明🎲' } });
-    const created = await expectJson<{ profile: { nickname: string; wechatName: string } }>(ok, 201);
-    assert.equal(created.profile.nickname, '小明');
-    assert.equal(created.profile.wechatName, '小明 🎲'); // stored as the admin typed it
-
-    // The same name cannot be claimed by a second account: it goes to the queue instead.
-    const other = await app.login('carol@example.com');
-    const taken = await expectJson<{ profile: { status: string } }>(
-      await app.fetch('/api/profile', { method: 'PUT', cookie: other, json: { nickname: 'Carol', wechatName: '小明 🎲' } }),
+    // Apply → pending, closed out of the app, greeting stored.
+    const applied = await expectJson<{ profile: { status: string; greeting: string; wechatName: string } }>(
+      await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '小明', wechatName: ' 小明🎲 ', greeting: '我是群里的小明，常玩德式' } }),
       201,
     );
-    assert.equal(taken.profile.status, 'pending');
-    // Resubmitting with a listed name activates immediately.
-    const resubmit = await expectJson<{ profile: { status: string; wechatName: string } }>(
-      await app.fetch('/api/profile', { method: 'PUT', cookie: other, json: { nickname: 'Carol', wechatName: ' 阿 花 ' } }),
-      200,
-    );
-    assert.equal(resubmit.profile.status, 'active');
-    assert.equal(resubmit.profile.wechatName, '阿花');
+    assert.equal(applied.profile.status, 'pending');
+    assert.equal(applied.profile.wechatName, '小明🎲');
+    assert.equal(applied.profile.greeting, '我是群里的小明，常玩德式');
+    assert.equal((await body(await app.fetch('/api/events', { cookie }))).error, 'approval_pending');
 
-    // The admin list shows who claimed what.
-    const list = await expectJson<{ names: InviteName[] }>(await app.fetch('/api/admin/invite-names', { cookie: admin }), 200);
-    const byName = Object.fromEntries(list.names.map((n) => [n.name, n.claimedBy?.nickname ?? null]));
-    assert.equal(byName['小明 🎲'], '小明');
-    assert.equal(byName['阿花'], 'Carol');
-    assert.equal(byName['老王'], null);
-    assert.equal(byName['群主本人'], '群主');
+    // Admin sees the greeting in the queue.
+    const list = await expectJson<{ requests: ApprovalRequest[] }>(await app.fetch('/api/admin/requests', { cookie: admin }), 200);
+    assert.equal(list.requests.length, 1);
+    assert.equal(list.requests[0]?.greeting, '我是群里的小明，常玩德式');
+    assert.equal(list.requests[0]?.email, 'bob@example.com');
 
-    // Editing later needs no name and cannot change it.
-    const edit = await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '小明明', bio: '喜欢重策', wechatName: '老王' } });
+    // Editing while pending re-applies (still pending); once active only nickname/bio change.
+    await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '小明明', wechatName: '小明🎲', greeting: '改了一下' } });
+    await app.fetch(`/api/admin/requests/${list.requests[0]?.userId}/approve`, { method: 'POST', cookie: admin, json: {} });
+    const edit = await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '小明明明', bio: '喜欢重策', wechatName: '别的' } });
     assert.equal(edit.status, 200);
-    const after = await body<{ profile: { nickname: string; bio: string; wechatName: string } }>(await app.fetch('/api/me', { cookie }));
-    assert.equal(after.profile.nickname, '小明明');
+    const after = await body<{ profile: { nickname: string; bio: string; wechatName: string; status: string } }>(await app.fetch('/api/me', { cookie }));
+    assert.equal(after.profile.status, 'active');
+    assert.equal(after.profile.nickname, '小明明明');
     assert.equal(after.profile.bio, '喜欢重策');
-    assert.equal(after.profile.wechatName, '小明 🎲');
-
-    // Unclaimed names can be deleted; claimed ones cannot.
-    const laowang = list.names.find((n) => n.name === '老王') as InviteName;
-    const xiaoming = list.names.find((n) => n.name === '小明 🎲') as InviteName;
-    assert.equal((await app.fetch(`/api/admin/invite-names/${laowang.id}`, { method: 'DELETE', cookie: admin })).status, 204);
-    assert.equal((await app.fetch(`/api/admin/invite-names/${xiaoming.id}`, { method: 'DELETE', cookie: admin })).status, 409);
+    assert.equal(after.profile.wechatName, '小明🎲');
 
     // Non-admins get 403 on the admin API.
-    assert.equal((await app.fetch('/api/admin/invite-names', { cookie })).status, 403);
-    assert.equal((await app.fetch('/api/admin/invite-names', { method: 'POST', cookie, json: { names: 'x' } })).status, 403);
+    assert.equal((await app.fetch('/api/admin/requests', { cookie })).status, 403);
+    assert.equal((await app.fetch('/api/admin/members', { cookie })).status, 403);
+  } finally {
+    app.close();
+  }
+});
+
+test('admin removes a member: access revoked, withdrawn from upcoming events, hosted events cancelled, may re-apply', async () => {
+  const app = await testApp();
+  try {
+    const admin = await app.admin();
+    const target = await app.member('t@example.com', '要走的人');
+    const host = await app.member('h@example.com', '局长');
+    const waiter = await app.member('w@example.com', '候补的');
+    const baseEvent = { kind: 'adhoc', title: '局', location: '北约克', startsAt: new Date(Date.now() + 86_400_000).toISOString(), durationMin: 180, capacity: 2, minSize: 2 };
+
+    // Target hosts one event and is confirmed (filling it) in another where someone waits.
+    const own = (await expectJson<{ events: { id: string }[] }>(await app.fetch('/api/events', { method: 'POST', cookie: target, json: { ...baseEvent, title: '他组的局' } }), 201)).events[0]!;
+    const other = (await expectJson<{ events: { id: string }[] }>(await app.fetch('/api/events', { method: 'POST', cookie: host, json: { ...baseEvent, title: '别人的局' } }), 201)).events[0]!;
+    await app.fetch(`/api/events/${other.id}/join`, { method: 'POST', cookie: target, json: {} });
+    const waitJoin = await expectJson<{ status: string }>(await app.fetch(`/api/events/${other.id}/join`, { method: 'POST', cookie: waiter, json: {} }), 200);
+    assert.equal(waitJoin.status, 'waitlisted');
+
+    const members = await expectJson<{ members: (Member & { isAdmin: boolean })[] }>(await app.fetch('/api/admin/members', { cookie: admin }), 200);
+    const t = members.members.find((m) => m.email === 't@example.com') as Member;
+    assert.ok(t);
+    assert.equal(members.members.find((m) => m.email === 'admin@example.com')?.isAdmin, true);
+
+    const removed = await expectJson<{ profile: { status: string; reviewNote: string }; cancelledEvents: number; withdrawnFrom: number }>(
+      await app.fetch(`/api/admin/members/${t.userId}`, { method: 'DELETE', cookie: admin, json: { note: '不是群里的人' } }),
+      200,
+    );
+    assert.equal(removed.profile.status, 'removed');
+    assert.equal(removed.profile.reviewNote, '不是群里的人');
+    assert.equal(removed.cancelledEvents, 1);
+    assert.equal(removed.withdrawnFrom, 1);
+
+    // Access revoked, with the reason.
+    const closed = await app.fetch('/api/events', { cookie: target });
+    assert.equal(closed.status, 403);
+    assert.equal((await body(closed)).error, 'membership_removed');
+    assert.equal((await body<{ profile: { status: string } }>(await app.fetch('/api/me', { cookie: target }))).profile.status, 'removed');
+
+    // Effects on events: hosted one cancelled, waiter promoted into the vacated seat.
+    const ownAfter = (await expectJson<{ event: { status: string; cancelReason: string } }>(await app.fetch(`/api/events/${own.id}`, { cookie: host }), 200)).event;
+    assert.equal(ownAfter.status, 'cancelled');
+    assert.equal(ownAfter.cancelReason, '组织者已被移出');
+    const otherAfter = (await expectJson<{ event: { participants: { nickname: string; status: string }[] } }>(await app.fetch(`/api/events/${other.id}`, { cookie: host }), 200)).event;
+    assert.deepEqual(otherAfter.participants.map((p) => `${p.nickname}:${p.status}`), ['局长:confirmed', '候补的:confirmed']);
+
+    // Gone from the members list; re-applies with a greeting → pending again.
+    const after = await expectJson<{ members: Member[] }>(await app.fetch('/api/admin/members', { cookie: admin }), 200);
+    assert.equal(after.members.some((m) => m.email === 't@example.com'), false);
+    const reapply = await expectJson<{ profile: { status: string } }>(
+      await app.fetch('/api/profile', { method: 'PUT', cookie: target, json: { nickname: '要走的人', wechatName: 'wx-要走的人', greeting: '误会了，我是群里的' } }),
+      200,
+    );
+    assert.equal(reapply.profile.status, 'pending');
+
+    // Guards: not a member, self, another admin.
+    assert.equal((await app.fetch(`/api/admin/members/${t.userId}`, { method: 'DELETE', cookie: admin, json: {} })).status, 409);
+    const me = await body<{ user: { id: string } }>(await app.fetch('/api/me', { cookie: admin }));
+    assert.equal((await body(await app.fetch(`/api/admin/members/${me.user.id}`, { method: 'DELETE', cookie: admin, json: {} }))).error, 'cannot_remove_self');
+    const second = await app.login('second-admin@example.com');
+    await app.fetch('/api/profile', { method: 'PUT', cookie: second, json: { nickname: '二群主', wechatName: '二群主' } });
+    const secondId = (await body<{ user: { id: string } }>(await app.fetch('/api/me', { cookie: second }))).user.id;
+    assert.equal((await body(await app.fetch(`/api/admin/members/${secondId}`, { method: 'DELETE', cookie: admin, json: {} }))).error, 'cannot_remove_admin');
+    assert.equal((await app.fetch(`/api/admin/members/${t.userId}`, { method: 'DELETE', cookie: host, json: {} })).status, 403);
   } finally {
     app.close();
   }
@@ -130,77 +171,12 @@ test('the magic-link verify page does not use no-referrer (browsers would send O
     assert.notEqual(res.headers.get('referrer-policy'), 'no-referrer');
     assert.match(await res.text(), /<form method="post"/);
 
-    // And a POST that arrives with Origin: null is still refused.
     const nullOrigin = await app.fetch('/auth/verify', {
       method: 'POST',
       headers: { Origin: 'null', 'Content-Type': 'application/x-www-form-urlencoded' },
       body: 'token=abcdefghijklmnopqrstuvwxyz0123456789',
     });
     assert.equal(nullOrigin.status, 403);
-  } finally {
-    app.close();
-  }
-});
-
-test('a name that is not on the list goes to the approval queue; admin approves or rejects', async () => {
-  const app = await testApp();
-  try {
-    const admin = await app.admin();
-    const cookie = await app.login('newbie@example.com');
-
-    // Submit with an unlisted name → pending, and the site stays closed.
-    const submitted = await expectJson<{ profile: { status: string; wechatName: string } }>(
-      await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '新人', wechatName: '路人甲' } }),
-      201,
-    );
-    assert.equal(submitted.profile.status, 'pending');
-    const closed = await app.fetch('/api/events', { cookie });
-    assert.equal(closed.status, 403);
-    assert.equal((await body(closed)).error, 'approval_pending');
-
-    // Admin sees it, with a count on /me.
-    const me = await body<{ pendingRequests: number }>(await app.fetch('/api/me', { cookie: admin }));
-    assert.equal(me.pendingRequests, 1);
-    const list = await expectJson<{ requests: { userId: string; wechatName: string; email: string }[] }>(await app.fetch('/api/admin/requests', { cookie: admin }), 200);
-    assert.equal(list.requests.length, 1);
-    assert.equal(list.requests[0]?.wechatName, '路人甲');
-    assert.equal(list.requests[0]?.email, 'newbie@example.com');
-    const userId = list.requests[0]?.userId as string;
-
-    // Reject with a note: user sees it, can resubmit.
-    const rejected = await expectJson<{ profile: { status: string; reviewNote: string } }>(
-      await app.fetch(`/api/admin/requests/${userId}/reject`, { method: 'POST', cookie: admin, json: { note: '群里没这个人' } }),
-      200,
-    );
-    assert.equal(rejected.profile.status, 'rejected');
-    assert.equal(rejected.profile.reviewNote, '群里没这个人');
-    assert.equal((await body(await app.fetch('/api/events', { cookie }))).error, 'approval_rejected');
-    assert.equal((await app.fetch(`/api/admin/requests/${userId}/approve`, { method: 'POST', cookie: admin, json: {} })).status, 409);
-
-    const again = await expectJson<{ profile: { status: string; reviewNote: string | null } }>(
-      await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '新人', wechatName: '路人乙' } }),
-      200,
-    );
-    assert.equal(again.profile.status, 'pending');
-    assert.equal(again.profile.reviewNote, null);
-
-    // Approve: the account opens and the name shows as registered on the list.
-    const approved = await expectJson<{ profile: { status: string } }>(
-      await app.fetch(`/api/admin/requests/${userId}/approve`, { method: 'POST', cookie: admin, json: {} }),
-      200,
-    );
-    assert.equal(approved.profile.status, 'active');
-    assert.equal((await app.fetch('/api/events', { cookie })).status, 200);
-    const names = await expectJson<{ names: { name: string; claimedBy: { nickname: string } | null }[] }>(await app.fetch('/api/admin/invite-names', { cookie: admin }), 200);
-    assert.equal(names.names.find((n) => n.name === '路人乙')?.claimedBy?.nickname, '新人');
-    assert.equal((await body<{ pendingRequests: number }>(await app.fetch('/api/me', { cookie: admin }))).pendingRequests, 0);
-
-    // Once active, the name can no longer be changed through the profile.
-    await app.fetch('/api/profile', { method: 'PUT', cookie, json: { nickname: '新人', wechatName: '别的' } });
-    assert.equal((await body<{ profile: { wechatName: string } }>(await app.fetch('/api/me', { cookie }))).profile.wechatName, '路人乙');
-
-    // Non-admins cannot touch the queue.
-    assert.equal((await app.fetch('/api/admin/requests', { cookie })).status, 403);
   } finally {
     app.close();
   }
