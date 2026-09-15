@@ -122,6 +122,49 @@ export async function upsertProfile(
   return { profile: await mustGet(db, userId), created: !existing };
 }
 
+export interface AddMemberInput {
+  email: string;
+  wechatName: string;
+  nickname?: string | null;
+}
+
+/**
+ * Admin adds a member directly by email: the account exists and is active
+ * before the person ever logs in, so their first login goes straight to
+ * the site with no invitation name and no approval. Also activates a
+ * pending / rejected profile for that email.
+ */
+export async function addMember(db: SqlClient, input: AddMemberInput, now: Date = new Date()): Promise<{ profile: Profile; email: string; created: boolean }> {
+  const email = input.email.trim().toLowerCase();
+  const wechatName = input.wechatName.trim();
+  const nickname = (input.nickname ?? wechatName).trim().slice(0, 20);
+  if (nickname.length < 2) throw new ApiError(400, 'validation', '站内昵称 2–20 个字；微信名太短时请填一个昵称。');
+  const at = now.toISOString();
+
+  await db.query(`insert into users (id, email, created_at) values ($1, $2, $3) on conflict (email) do nothing`, [crypto.randomUUID(), email, at]);
+  const { rows } = await db.query<{ id: string }>('select id from users where email = $1', [email]);
+  const userId = rows[0]?.id;
+  if (!userId) throw new Error('profiles: user row missing after insert');
+
+  const existing = await getProfile(db, userId);
+  if (existing?.status === 'active') throw new ApiError(409, 'already_member', `${email} 已经是成员了。`);
+
+  await recordClaimedName(db, userId, wechatName, now);
+  if (existing) {
+    await db.query(
+      `update profiles set nickname = $2, wechat_name = $3, invite_code = $4, status = 'active', review_note = null, updated_at = $5 where user_id = $1`,
+      [userId, nickname, wechatName, normalizeWechatName(wechatName), at],
+    );
+  } else {
+    await db.query(
+      `insert into profiles (user_id, nickname, wechat_name, bio, invite_code, status, review_note, created_at, updated_at)
+       values ($1, $2, $3, null, $4, 'active', null, $5, $5)`,
+      [userId, nickname, wechatName, normalizeWechatName(wechatName), at],
+    );
+  }
+  return { profile: await mustGet(db, userId), email, created: !existing };
+}
+
 export async function listApprovalRequests(db: SqlClient): Promise<ApprovalRequest[]> {
   const { rows } = await db.query<{ user_id: string; nickname: string; wechat_name: string; email: string; updated_at: string | Date }>(
     `select p.user_id, p.nickname, p.wechat_name, u.email, p.updated_at

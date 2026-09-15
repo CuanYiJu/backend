@@ -32,6 +32,8 @@ export interface EventSummary {
   /** The viewer's own registration, if any. */
   myStatus: RegistrationStatus | null;
   isHost: boolean;
+  /** The viewer may edit, cancel and remove players: the host, or an admin. */
+  canManage: boolean;
   /** No more joins: cancelled or already over. */
   isPast: boolean;
 }
@@ -74,6 +76,11 @@ export interface UpdateEventInput {
 }
 
 export type ListScope = 'upcoming' | 'past' | 'mine';
+
+/** Who is asking. Admins get host powers on every event. */
+export interface ViewerOptions {
+  isAdmin?: boolean;
+}
 
 interface EventRow {
   id: string;
@@ -154,7 +161,7 @@ function endOf(startsAt: string | Date, durationMin: number): Date {
   return new Date(new Date(startsAt).getTime() + durationMin * 60_000);
 }
 
-function fromRow(r: EventRow, viewerId: string | null, now: Date): EventSummary {
+function fromRow(r: EventRow, viewerId: string | null, now: Date, isAdmin = false): EventSummary {
   const endsAt = endOf(r.starts_at, r.duration_min);
   return {
     id: r.id,
@@ -178,6 +185,7 @@ function fromRow(r: EventRow, viewerId: string | null, now: Date): EventSummary 
     waitlistCount: Number(r.waitlist_count),
     myStatus: r.my_status,
     isHost: viewerId === r.host_id,
+    canManage: viewerId === r.host_id || isAdmin,
     isPast: r.status === 'cancelled' || endsAt <= now,
   };
 }
@@ -185,7 +193,7 @@ function fromRow(r: EventRow, viewerId: string | null, now: Date): EventSummary 
 /** Events longer than this are not expected; used to bound the "still running" window. */
 const MAX_EVENT_HOURS = 24;
 
-export async function listEvents(db: SqlClient, scope: ListScope, viewerId: string, now: Date = new Date()): Promise<EventSummary[]> {
+export async function listEvents(db: SqlClient, scope: ListScope, viewerId: string, now: Date = new Date(), viewer: ViewerOptions = {}): Promise<EventSummary[]> {
   const windowStart = new Date(now.getTime() - MAX_EVENT_HOURS * 3_600_000);
   let sql: string;
   let params: unknown[];
@@ -207,7 +215,7 @@ export async function listEvents(db: SqlClient, scope: ListScope, viewerId: stri
       break;
   }
   const { rows } = await db.query<EventRow>(sql, params);
-  const events = rows.map((r) => fromRow(r, viewerId, now));
+  const events = rows.map((r) => fromRow(r, viewerId, now, viewer.isAdmin));
   if (scope === 'upcoming') return events.filter((e) => !e.isPast);
   if (scope === 'past') return events.filter((e) => e.isPast);
   return events;
@@ -225,7 +233,7 @@ function likePattern(q: string): string {
  * viewer hosted or was confirmed — other people's history stays private.
  * Upcoming results first (soonest first), then history (latest first).
  */
-export async function searchEvents(db: SqlClient, q: string, viewerId: string, now: Date = new Date()): Promise<EventSummary[]> {
+export async function searchEvents(db: SqlClient, q: string, viewerId: string, now: Date = new Date(), viewer: ViewerOptions = {}): Promise<EventSummary[]> {
   const term = q.trim().toLowerCase();
   if (!term) return [];
   const pattern = likePattern(term);
@@ -253,7 +261,7 @@ export async function searchEvents(db: SqlClient, q: string, viewerId: string, n
      order by e.starts_at desc limit 300`,
     [viewerId, pattern, windowStart.toISOString()],
   );
-  const events = rows.map((r) => fromRow(r, viewerId, now));
+  const events = rows.map((r) => fromRow(r, viewerId, now, viewer.isAdmin));
   // The SQL window is generous; apply the exact rule here: past or cancelled
   // only when the viewer hosted or was confirmed.
   const visible = events.filter((e) => !e.isPast || e.isHost || e.myStatus === 'confirmed');
@@ -262,13 +270,13 @@ export async function searchEvents(db: SqlClient, q: string, viewerId: string, n
   return [...upcoming, ...history].slice(0, 100);
 }
 
-async function loadEvent(db: SqlClient, id: string, viewerId: string | null, now: Date): Promise<EventSummary | null> {
+async function loadEvent(db: SqlClient, id: string, viewerId: string | null, now: Date, isAdmin = false): Promise<EventSummary | null> {
   const { rows } = await db.query<EventRow>(`${SELECT_EVENT} where e.id = $2`, [viewerId, id]);
-  return rows[0] ? fromRow(rows[0], viewerId, now) : null;
+  return rows[0] ? fromRow(rows[0], viewerId, now, isAdmin) : null;
 }
 
-export async function getEvent(db: SqlClient, id: string, viewerId: string, now: Date = new Date()): Promise<EventDetail> {
-  const event = await loadEvent(db, id, viewerId, now);
+export async function getEvent(db: SqlClient, id: string, viewerId: string, now: Date = new Date(), viewer: ViewerOptions = {}): Promise<EventDetail> {
+  const event = await loadEvent(db, id, viewerId, now, viewer.isAdmin);
   if (!event) throw notFound();
   const { rows } = await db.query<{ user_id: string; nickname: string; wechat_name: string | null; status: 'confirmed' | 'waitlisted'; created_at: string | Date }>(
     `select r.user_id, p.nickname, p.wechat_name, r.status, r.created_at
@@ -325,15 +333,16 @@ export async function createEvent(db: Db, hostId: string, input: CreateEventInpu
   return created;
 }
 
-async function requireHost(db: SqlClient, id: string, userId: string, now: Date): Promise<EventSummary> {
-  const event = await loadEvent(db, id, userId, now);
+/** The host, or an admin, may manage the event. */
+async function requireManager(db: SqlClient, id: string, userId: string, now: Date, viewer: ViewerOptions): Promise<EventSummary> {
+  const event = await loadEvent(db, id, userId, now, viewer.isAdmin);
   if (!event) throw notFound();
-  if (event.host.id !== userId) throw forbidden('只有组织者可以这样做。');
+  if (!event.canManage) throw forbidden('只有组织者或群主可以这样做。');
   return event;
 }
 
-export async function updateEvent(db: Db, id: string, hostId: string, patch: UpdateEventInput, now: Date = new Date()): Promise<EventSummary> {
-  const event = await requireHost(db, id, hostId, now);
+export async function updateEvent(db: Db, id: string, hostId: string, patch: UpdateEventInput, now: Date = new Date(), viewer: ViewerOptions = {}): Promise<EventSummary> {
+  const event = await requireManager(db, id, hostId, now, viewer);
   if (event.status === 'cancelled') throw new ApiError(409, 'event_cancelled', '这个局已取消，不能再改。');
   const next = {
     title: patch.title ?? event.title,
@@ -354,17 +363,17 @@ export async function updateEvent(db: Db, id: string, hostId: string, patch: Upd
     },
     promote(id, now), // fills seats if capacity went up; no-op otherwise
   ]);
-  const updated = await loadEvent(db, id, hostId, now);
+  const updated = await loadEvent(db, id, hostId, now, viewer.isAdmin);
   if (!updated) throw notFound();
   return updated;
 }
 
-export async function cancelEvent(db: SqlClient, id: string, hostId: string, reason: string | null, now: Date = new Date()): Promise<EventSummary> {
-  const event = await requireHost(db, id, hostId, now);
+export async function cancelEvent(db: SqlClient, id: string, hostId: string, reason: string | null, now: Date = new Date(), viewer: ViewerOptions = {}): Promise<EventSummary> {
+  const event = await requireManager(db, id, hostId, now, viewer);
   if (event.status !== 'cancelled') {
     await db.query(`update events set status = 'cancelled', cancel_reason = $2, updated_at = $3 where id = $1`, [id, reason, now.toISOString()]);
   }
-  const updated = await loadEvent(db, id, hostId, now);
+  const updated = await loadEvent(db, id, hostId, now, viewer.isAdmin);
   if (!updated) throw notFound();
   return updated;
 }
@@ -408,8 +417,8 @@ export async function leaveEvent(db: Db, eventId: string, userId: string, now: D
   return { promoted: promoted?.rows.map((r) => r.user_id) ?? [] };
 }
 
-export async function removeParticipant(db: Db, eventId: string, hostId: string, targetUserId: string, now: Date = new Date()): Promise<{ promoted: string[] }> {
-  await requireHost(db, eventId, hostId, now);
+export async function removeParticipant(db: Db, eventId: string, hostId: string, targetUserId: string, now: Date = new Date(), viewer: ViewerOptions = {}): Promise<{ promoted: string[] }> {
+  await requireManager(db, eventId, hostId, now, viewer);
   const [removed, promoted] = await db.batch<{ user_id: string }>([
     {
       text: `update registrations set status = 'removed', updated_at = $3

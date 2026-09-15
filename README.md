@@ -48,6 +48,7 @@ All JSON. Errors are `{ error, message }` with a Chinese `message` ready to show
 | `POST /auth/logout` | — | Clear session. |
 | `GET /api/me` | login | `{ user: { id, email }, profile \| null }`. 401 when logged out. |
 | `PUT /api/profile` `{ nickname, wechatName?, bio? }` | login | Create (201). `wechatName` on the list and free → `status: active`; otherwise `status: pending` for the admin. Admins are always active. While pending / rejected the user may resubmit (200) with another name; once active only nickname / bio change. |
+| `POST /api/admin/members` `{ email, wechatName, nickname? }` | admin | Add a member directly: creates the account (if new) with an active profile, so that email logs straight in. 409 if already an active member. |
 | `GET /api/admin/requests` | admin | Pending profiles: nickname, WeChat name, email, time. |
 | `POST /api/admin/requests/:userId/approve` | admin | Activate; the name is recorded as claimed on the list. |
 | `POST /api/admin/requests/:userId/reject` `{ note? }` | admin | Mark rejected with an optional note the user sees; they may resubmit. |
@@ -58,11 +59,11 @@ All JSON. Errors are `{ error, message }` with a Chinese `message` ready to show
 | `POST /api/events` | profile | Create. `kind: regular \| adhoc`; `repeatWeeks` > 1 creates weekly copies sharing `seriesId`. Host is auto-registered. |
 | `GET /api/events/search?q=` | profile | Free text over title, games, description, location, host and participant names. Past or cancelled events only where the caller hosted or was confirmed. Upcoming first, then history. |
 | `GET /api/events/:id` | profile | Detail with participants (confirmed then waitlist, in queue order). |
-| `PATCH /api/events/:id` | host | Edit. Raising capacity promotes from the waitlist. |
-| `POST /api/events/:id/cancel` `{ reason? }` | host | Cancel this occurrence. |
+| `PATCH /api/events/:id` | host or admin | Edit. Raising capacity promotes from the waitlist. |
+| `POST /api/events/:id/cancel` `{ reason? }` | host or admin | Cancel this occurrence. |
 | `POST /api/events/:id/join` | profile | `{ status: confirmed \| waitlisted }`. |
 | `POST /api/events/:id/leave` | profile | Leave; a confirmed leaver's seat goes to the first waitlisted. |
-| `DELETE /api/events/:id/participants/:userId` | host | Remove someone; promotes as above. |
+| `DELETE /api/events/:id/participants/:userId` | host or admin | Remove someone; promotes as above. |
 
 "profile" means logged in **and** an active profile; otherwise 403 `profile_required` / `approval_pending` / `approval_rejected`, which the frontend turns into a redirect to `/onboarding` (which shows the waiting or rejected state). "admin" means the login email is in `ADMIN_EMAILS`. `GET /api/me` returns `isAdmin` and, for admins, `pendingRequests`.
 

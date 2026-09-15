@@ -4,7 +4,7 @@ import type { Db } from '../db/types.ts';
 import type { AppConfig } from '../config.ts';
 import type { Auth } from '../auth.ts';
 import { ApiError, forbidden, profileRequired, unauthenticated } from '../errors.ts';
-import { approveRequest, countApprovalRequests, getProfile, listApprovalRequests, rejectRequest, upsertProfile, type Profile } from '../services/profiles.ts';
+import { addMember, approveRequest, countApprovalRequests, getProfile, listApprovalRequests, rejectRequest, upsertProfile, type Profile } from '../services/profiles.ts';
 import { addInviteNames, listInviteNames, removeInviteName } from '../services/invites.ts';
 import {
   cancelEvent,
@@ -79,6 +79,11 @@ const updateEventSchema = z.object({
 const cancelSchema = z.object({ reason: optionalText(200) });
 const inviteNamesSchema = z.object({ names: z.string().max(20_000) });
 const rejectSchema = z.object({ note: optionalText(200) });
+const addMemberSchema = z.object({
+  email: z.string().trim().email('请填写正确的邮箱。').max(254),
+  wechatName: trimmed(40).min(1, '请填写微信名。'),
+  nickname: optionalText(20),
+});
 
 async function parseBody<T>(c: Context, schema: z.ZodType<T>): Promise<T> {
   const data: unknown = await c.req.json().catch(() => null);
@@ -176,6 +181,13 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
     return c.body(null, 204);
   });
 
+  api.post('/admin/members', async (c) => {
+    requireAdmin(c);
+    const input = await parseBody(c, addMemberSchema);
+    const result = await addMember(db, input);
+    return c.json(result, result.created ? 201 : 200);
+  });
+
   api.get('/admin/requests', async (c) => {
     requireAdmin(c);
     return c.json({ requests: await listApprovalRequests(db) });
@@ -198,7 +210,7 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
     if (scope !== undefined && scope !== 'upcoming' && scope !== 'past' && scope !== 'mine') {
       throw new ApiError(400, 'validation', 'scope 只能是 upcoming / past / mine。');
     }
-    return c.json({ events: await listEvents(db, scope ?? 'upcoming', userId) });
+    return c.json({ events: await listEvents(db, scope ?? 'upcoming', userId, new Date(), { isAdmin: c.get('isAdmin') }) });
   });
 
   // Before /events/:id so "search" is not taken for an id.
@@ -206,7 +218,7 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
     const userId = requireMember(c);
     const q = (c.req.query('q') ?? '').trim();
     if (q.length > 50) throw new ApiError(400, 'validation', '搜索词太长了。');
-    return c.json({ events: q ? await searchEvents(db, q, userId) : [] });
+    return c.json({ events: q ? await searchEvents(db, q, userId, new Date(), { isAdmin: c.get('isAdmin') }) : [] });
   });
 
   api.post('/events', async (c) => {
@@ -216,42 +228,44 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
     return c.json({ events }, 201);
   });
 
+  const viewer = (c: Context<Env>) => ({ isAdmin: c.get('isAdmin') });
+
   api.get('/events/:id', async (c) => {
     const userId = requireMember(c);
-    return c.json({ event: await getEvent(db, c.req.param('id'), userId) });
+    return c.json({ event: await getEvent(db, c.req.param('id'), userId, new Date(), viewer(c)) });
   });
 
   api.patch('/events/:id', async (c) => {
     const userId = requireMember(c);
     const patch = await parseBody(c, updateEventSchema);
-    return c.json({ event: await updateEvent(db, c.req.param('id'), userId, patch) });
+    return c.json({ event: await updateEvent(db, c.req.param('id'), userId, patch, new Date(), viewer(c)) });
   });
 
   api.post('/events/:id/cancel', async (c) => {
     const userId = requireMember(c);
     const { reason } = await parseBody(c, cancelSchema);
-    return c.json({ event: await cancelEvent(db, c.req.param('id'), userId, reason) });
+    return c.json({ event: await cancelEvent(db, c.req.param('id'), userId, reason, new Date(), viewer(c)) });
   });
 
   api.post('/events/:id/join', async (c) => {
     const userId = requireMember(c);
     const id = c.req.param('id');
     const result = await joinEvent(db, id, userId);
-    return c.json({ ...result, event: await getEvent(db, id, userId) });
+    return c.json({ ...result, event: await getEvent(db, id, userId, new Date(), viewer(c)) });
   });
 
   api.post('/events/:id/leave', async (c) => {
     const userId = requireMember(c);
     const id = c.req.param('id');
     const result = await leaveEvent(db, id, userId);
-    return c.json({ ...result, event: await getEvent(db, id, userId) });
+    return c.json({ ...result, event: await getEvent(db, id, userId, new Date(), viewer(c)) });
   });
 
   api.delete('/events/:id/participants/:userId', async (c) => {
     const hostId = requireMember(c);
     const id = c.req.param('id');
-    const result = await removeParticipant(db, id, hostId, c.req.param('userId'));
-    return c.json({ ...result, event: await getEvent(db, id, hostId) });
+    const result = await removeParticipant(db, id, hostId, c.req.param('userId'), new Date(), viewer(c));
+    return c.json({ ...result, event: await getEvent(db, id, hostId, new Date(), viewer(c)) });
   });
 
   api.notFound((c) => c.json({ error: 'not_found', message: '接口不存在。' }, 404));
