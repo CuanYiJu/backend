@@ -38,7 +38,8 @@ serve({ fetch: outer.fetch, port: config.port }, (info) => {
   console.log(`  public origin (APP_BASE_URL): ${config.magicLink.baseUrl}`);
   console.log(`  admins: ${config.adminEmails.join(', ')}`);
   console.log(`  database: ${config.databaseFile}`);
-  if (!config.mailjet && !config.resendApiKey) console.log('  login emails are printed here (no MAILJET_* or RESEND_API_KEY set)');
+  if (config.e2eMailbox) console.log('  E2E_MAILBOX on: login emails kept in memory, readable at /api/_test/mail?to=...');
+  else if (!config.mailjet && !config.resendApiKey) console.log('  login emails are printed here (no MAILJET_* or RESEND_API_KEY set)');
 });
 
 const shutdown = () => {

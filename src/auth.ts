@@ -7,6 +7,7 @@ import {
   PgUserStore,
   ResendMailer,
   createHandlers,
+  unlimited,
   type EmailMessage,
   type Mailer,
   type MagicLinkHandlers,
@@ -14,10 +15,13 @@ import {
 } from './magic-link.ts';
 import type { AppConfig } from './config.ts';
 import { MailjetMailer } from './mailers/mailjet.ts';
+import { MailboxMailer } from './mailers/mailbox.ts';
 
 export interface Auth {
   service: MagicLinkService;
   handlers: MagicLinkHandlers;
+  /** Set when E2E_MAILBOX is on: tests read login codes from it. */
+  mailbox: MailboxMailer | null;
 }
 
 export interface AuthOptions {
@@ -49,8 +53,9 @@ export class LoggingMailer implements Mailer {
   }
 }
 
-/** Mailjet when its keys are set, else Resend, else print to the log. */
+/** E2E mailbox when enabled; else Mailjet when its keys are set, else Resend, else print to the log. */
 export function selectMailer(config: AppConfig): Mailer {
+  if (config.e2eMailbox) return new MailboxMailer();
   if (config.mailjet) return new LoggingMailer('mailjet', new MailjetMailer(config.mailjet));
   if (config.resendApiKey) return new LoggingMailer('resend', new ResendMailer({ apiKey: config.resendApiKey }));
   return new ConsoleMailer();
@@ -62,14 +67,16 @@ export function selectMailer(config: AppConfig): Mailer {
  * RETURNING, partial indexes and ON CONFLICT all exist in both.
  */
 export function createAuth(config: AppConfig, db: SqlClient, options: AuthOptions = {}): Auth {
+  const mailer = options.mailer ?? selectMailer(config);
   const service = new MagicLinkService({
     config: config.magicLink,
     tokens: new PgTokenStore(db),
     sessions: new PgSessionStore(db),
     users: new PgUserStore(db),
-    mailer: options.mailer ?? selectMailer(config),
-    rateLimiter: new MemoryRateLimiter(),
+    mailer,
+    // Rate limits would make a test run of dozens of logins from one IP fail.
+    rateLimiter: config.e2eMailbox ? unlimited : new MemoryRateLimiter(),
   });
   const handlers = createHandlers(service, { trustProxy: config.trustProxy });
-  return { service, handlers };
+  return { service, handlers, mailbox: mailer instanceof MailboxMailer ? mailer : null };
 }

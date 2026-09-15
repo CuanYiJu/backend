@@ -28,6 +28,19 @@ export function createApp(config: AppConfig, db: Db, options: AuthOptions = {}):
   hono.get('/auth/me', (c) => handlers.me(c.req.raw));
 
   hono.get('/healthz', (c) => c.json({ ok: true }));
+
+  // End-to-end tests read login codes here instead of a real inbox. Only
+  // exists when E2E_MAILBOX=1, which config refuses in production.
+  if (auth.mailbox) {
+    const mailbox = auth.mailbox;
+    hono.get('/api/_test/mail', (c) => {
+      const to = c.req.query('to');
+      if (!to) return c.json({ error: 'validation', message: 'to is required' }, 400);
+      const entry = mailbox.latest(to);
+      return entry ? c.json(entry) : c.json({ error: 'not_found', message: 'no mail for that address' }, 404);
+    });
+  }
+
   hono.route('/api', createApiRoutes({ config, db, auth }));
 
   return { hono, auth };

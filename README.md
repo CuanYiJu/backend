@@ -134,6 +134,10 @@ NODE_ENV=production STATIC_DIR=../frontend/dist APP_BASE_URL=https://your.domain
 
 Same code, SQLite file in `data/`; put it behind any HTTPS reverse proxy and back the file up.
 
+## End-to-end test hook
+
+`E2E_MAILBOX=1` (never in production; config throws) keeps login emails in memory, exposes the newest per address at `GET /api/_test/mail?to=…` (`code`, `link`) and turns login rate limits off. `../qa` starts the backend this way; nothing else should.
+
 ## Not in the MVP (deliberately)
 
 Host approval of sign-ups, email notifications on promotion / cancellation, min-size auto-cancel, check-in and no-show records, blocking, series-wide edits, admin pages. The data model leaves room for all of them (see plan §4.3–4.4, appendix A).

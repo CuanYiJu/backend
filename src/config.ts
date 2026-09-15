@@ -12,6 +12,8 @@ export interface AppConfig {
   staticDir: string | null;
   mailjet: { apiKey: string; secretKey: string } | null;
   resendApiKey: string | null;
+  /** E2E_MAILBOX=1: keep login mail in memory, expose it at /api/_test/mail, disable rate limits. Never in production. */
+  e2eMailbox: boolean;
   magicLink: MagicLinkConfig;
   /** Warnings about dev-only defaults that were applied. */
   warnings: string[];
@@ -51,6 +53,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     throw new Error('config: MAILJET_API_KEY and MAILJET_SECRET_KEY must both be set');
   }
 
+  const e2eMailbox = env.E2E_MAILBOX === '1' || env.E2E_MAILBOX === 'true';
+  if (e2eMailbox && production) throw new Error('config: E2E_MAILBOX cannot be enabled in production');
+
   return {
     nodeEnv,
     port: Number(env.PORT ?? 8787),
@@ -60,6 +65,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     staticDir: env.STATIC_DIR || null,
     mailjet,
     resendApiKey: env.RESEND_API_KEY || null,
+    e2eMailbox,
     magicLink,
     warnings,
   };
