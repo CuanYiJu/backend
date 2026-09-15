@@ -14,6 +14,7 @@ import {
   leaveEvent,
   listEvents,
   removeParticipant,
+  searchEvents,
   updateEvent,
 } from '../services/events.ts';
 
@@ -198,6 +199,14 @@ export function createApiRoutes({ config, db, auth }: ApiDeps): Hono<Env> {
       throw new ApiError(400, 'validation', 'scope 只能是 upcoming / past / mine。');
     }
     return c.json({ events: await listEvents(db, scope ?? 'upcoming', userId) });
+  });
+
+  // Before /events/:id so "search" is not taken for an id.
+  api.get('/events/search', async (c) => {
+    const userId = requireMember(c);
+    const q = (c.req.query('q') ?? '').trim();
+    if (q.length > 50) throw new ApiError(400, 'validation', '搜索词太长了。');
+    return c.json({ events: q ? await searchEvents(db, q, userId) : [] });
   });
 
   api.post('/events', async (c) => {

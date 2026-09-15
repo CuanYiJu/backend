@@ -213,6 +213,55 @@ export async function listEvents(db: SqlClient, scope: ListScope, viewerId: stri
   return events;
 }
 
+/** Escape LIKE wildcards in user input; the query uses `escape '\\'`. */
+function likePattern(q: string): string {
+  return '%' + q.replace(/[\\%_]/g, (ch) => '\\' + ch) + '%';
+}
+
+/**
+ * Free-text search over title, games, description, location, and the
+ * nicknames / WeChat names of the host and active participants. Upcoming
+ * events are searched for everyone; past or cancelled ones only where the
+ * viewer hosted or was confirmed — other people's history stays private.
+ * Upcoming results first (soonest first), then history (latest first).
+ */
+export async function searchEvents(db: SqlClient, q: string, viewerId: string, now: Date = new Date()): Promise<EventSummary[]> {
+  const term = q.trim().toLowerCase();
+  if (!term) return [];
+  const pattern = likePattern(term);
+  const windowStart = new Date(now.getTime() - MAX_EVENT_HOURS * 3_600_000);
+  const { rows } = await db.query<EventRow>(
+    `${SELECT_EVENT}
+     where (
+       lower(e.title) like $2 escape '\\'
+       or lower(coalesce(e.games, '')) like $2 escape '\\'
+       or lower(coalesce(e.description, '')) like $2 escape '\\'
+       or lower(e.location) like $2 escape '\\'
+       or lower(p.nickname) like $2 escape '\\'
+       or lower(p.wechat_name) like $2 escape '\\'
+       or exists (
+         select 1 from registrations r join profiles pp on pp.user_id = r.user_id
+         where r.event_id = e.id and r.status in ('confirmed', 'waitlisted')
+           and (lower(pp.nickname) like $2 escape '\\' or lower(pp.wechat_name) like $2 escape '\\')
+       )
+     )
+     and (
+       (e.status = 'open' and e.starts_at >= $3)
+       or e.host_id = $1
+       or exists (select 1 from registrations r where r.event_id = e.id and r.user_id = $1 and r.status = 'confirmed')
+     )
+     order by e.starts_at desc limit 300`,
+    [viewerId, pattern, windowStart.toISOString()],
+  );
+  const events = rows.map((r) => fromRow(r, viewerId, now));
+  // The SQL window is generous; apply the exact rule here: past or cancelled
+  // only when the viewer hosted or was confirmed.
+  const visible = events.filter((e) => !e.isPast || e.isHost || e.myStatus === 'confirmed');
+  const upcoming = visible.filter((e) => !e.isPast).sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+  const history = visible.filter((e) => e.isPast);
+  return [...upcoming, ...history].slice(0, 100);
+}
+
 async function loadEvent(db: SqlClient, id: string, viewerId: string | null, now: Date): Promise<EventSummary | null> {
   const { rows } = await db.query<EventRow>(`${SELECT_EVENT} where e.id = $2`, [viewerId, id]);
   return rows[0] ? fromRow(rows[0], viewerId, now) : null;

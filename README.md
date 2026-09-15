@@ -56,6 +56,7 @@ All JSON. Errors are `{ error, message }` with a Chinese `message` ready to show
 | `DELETE /api/admin/invite-names/:id` | admin | Remove an unclaimed name (409 if claimed). |
 | `GET /api/events?scope=upcoming\|past\|mine` | profile | List with counts and the caller's own status. |
 | `POST /api/events` | profile | Create. `kind: regular \| adhoc`; `repeatWeeks` > 1 creates weekly copies sharing `seriesId`. Host is auto-registered. |
+| `GET /api/events/search?q=` | profile | Free text over title, games, description, location, host and participant names. Past or cancelled events only where the caller hosted or was confirmed. Upcoming first, then history. |
 | `GET /api/events/:id` | profile | Detail with participants (confirmed then waitlist, in queue order). |
 | `PATCH /api/events/:id` | host | Edit. Raising capacity promotes from the waitlist. |
 | `POST /api/events/:id/cancel` `{ reason? }` | host | Cancel this occurrence. |
